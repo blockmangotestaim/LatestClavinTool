@@ -10,23 +10,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Finds the Gradle project wherever it is: already unpacked in the repo root, inside a sub-folder,
-      # or inside ANY .zip in the repo root (a zip named *clavintool* is preferred).
-      - name: Locate the project
+      # Unpacks the project zip FIRST, whatever it is called (spaces / brackets / "(1)" are fine) and wherever
+      # it was uploaded in the repo. If the project is already unpacked, that is used instead.
+      - name: Unpack the project zip and locate the project
         run: |
+          echo "Files in the repo:"
+          find . -maxdepth 3 -not -path './.git/*' -not -path './.git' | sort | head -80
+
           if [ -f settings.gradle ]; then
             DIR=.
           else
-            ZIPS=$(ls ./*clavintool*.zip 2>/dev/null || ls ./*.zip 2>/dev/null || true)
-            for z in $ZIPS; do
-              echo "Unpacking $z"
-              mkdir -p "_src/$(basename "$z" .zip)"
-              unzip -o -q "$z" -d "_src/$(basename "$z" .zip)"
-            done
-            SETTINGS=$(find . -name settings.gradle -not -path './.git/*' | awk '{ print length($0) " " $0 }' | sort -n | head -1 | cut -d' ' -f2-)
+            mkdir -p _src
+            N=0
+            # every .zip in the repo that contains a Gradle project gets unpacked
+            while IFS= read -r -d '' z; do
+              if unzip -l "$z" > "$RUNNER_TEMP/zip_list.txt" 2>/dev/null && grep -q 'settings.gradle' "$RUNNER_TEMP/zip_list.txt"; then
+                N=$((N+1))
+                echo "Unpacking: $z"
+                mkdir -p "_src/$N"
+                unzip -o -q "$z" -d "_src/$N"
+              else
+                echo "Skipping (no Gradle project inside): $z"
+              fi
+            done < <(find . -iname '*.zip' -not -path './_src/*' -not -path './.git/*' -print0)
+
+            # candidates: every settings.gradle that is not inside a build/cache folder
+            BEST=""
+            while IFS= read -r s; do
+              if grep -qi 'clavintool' "$s"; then BEST="$s"; break; fi   # prefer the ClavinTool project
+              [ -z "$FIRST" ] && FIRST="$s"
+            done < <(find . -name settings.gradle -not -path './.git/*' -not -path '*/node_modules/*' | awk '{ print length($0) " " $0 }' | sort -n | cut -d' ' -f2-)
+            SETTINGS="${BEST:-$FIRST}"
+
             if [ -z "$SETTINGS" ]; then
-              echo "::error::No settings.gradle found anywhere in the repo. Upload clavintool.zip to the repo root, or the unzipped project files. Files I can see:"
-              find . -maxdepth 3 -not -path './.git/*' | head -60
+              echo "::error::No Gradle project (settings.gradle) found - not unpacked and not in any zip. Upload the project zip (clavintool.zip) to the repo."
               exit 1
             fi
             DIR=$(dirname "$SETTINGS")
