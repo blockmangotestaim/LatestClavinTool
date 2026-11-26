@@ -1,0 +1,67 @@
+name: Build ClavinTool APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Finds the Gradle project wherever it is: already unpacked in the repo root, inside a sub-folder,
+      # or inside ANY .zip in the repo root (a zip named *clavintool* is preferred).
+      - name: Locate the project
+        run: |
+          if [ -f settings.gradle ]; then
+            DIR=.
+          else
+            ZIPS=$(ls ./*clavintool*.zip 2>/dev/null || ls ./*.zip 2>/dev/null || true)
+            for z in $ZIPS; do
+              echo "Unpacking $z"
+              mkdir -p "_src/$(basename "$z" .zip)"
+              unzip -o -q "$z" -d "_src/$(basename "$z" .zip)"
+            done
+            SETTINGS=$(find . -name settings.gradle -not -path './.git/*' | awk '{ print length($0) " " $0 }' | sort -n | head -1 | cut -d' ' -f2-)
+            if [ -z "$SETTINGS" ]; then
+              echo "::error::No settings.gradle found anywhere in the repo. Upload clavintool.zip to the repo root, or the unzipped project files. Files I can see:"
+              find . -maxdepth 3 -not -path './.git/*' | head -60
+              exit 1
+            fi
+            DIR=$(dirname "$SETTINGS")
+          fi
+          echo "Project folder: $DIR"
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Make sure NDK + CMake are installed
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;26.3.11579264" "cmake;3.22.1" || true
+
+      - name: Build APK with native Lua 5.3
+        id: native
+        continue-on-error: true
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle assembleDebug --no-daemon --stacktrace -PwithNative=true
+
+      - name: Fallback build (Lua 5.2 only) if the native build failed
+        if: steps.native.outcome == 'failure'
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          echo "::warning::Native Lua 5.3 build FAILED - building a fallback APK with the Lua 5.2 engine. Open the 'Build APK with native Lua 5.3' step and send me the error."
+          gradle assembleDebug --no-daemon --stacktrace -PwithNative=false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClavinTool-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
